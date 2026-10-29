@@ -1,9 +1,13 @@
 /* 静态版的「后端」：没有服务器，全靠这几包加密文件。
- * 页面上先要求口令 → WebCrypto 解出 core（图/尘埃/向量/事件索引），
- * 再把 window.fetch 里所有 /api/* 的请求就地答掉 —— 星图代码一行都不用改。
+ * 口令 → WebCrypto 解密 → DecompressionStream 解 gzip → 再把 window.fetch 里
+ * 所有 /api/* 的请求就地答掉（星图代码一行都不用改）。
+ *
+ * 数据走哪：window.SHIHAI_DATA_BASE（index.html 里写死），默认 ./data/。
+ * 国内直连 GitHub Pages 只有几 KB/s，所以线上用 jsDelivr 那种更快的 CDN 取数据。
  */
 (function () {
   const PASS_KEY = 'shihai.pass';
+  const BASE = (window.SHIHAI_DATA_BASE || './data/').replace(/\/?$/, '/');
   const qs = new URLSearchParams(location.search);
 
   const state = {
@@ -12,13 +16,24 @@
     loading: null,
     nodeById: new Map(),
     nodeByUid: new Map(),
-    shards: new Map(),
+    events: new Map(),
     vecs: null,
   };
 
-  /* ---------- 解密 ---------- */
   const te = new TextEncoder();
   const td = new TextDecoder();
+
+  function concat(a, b) {
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a, 0); out.set(b, a.length);
+    return out;
+  }
+
+  async function gunzip(bytes) {
+    const ds = new DecompressionStream('gzip');
+    const stream = new Blob([bytes]).stream().pipeThrough(ds);
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
 
   async function decrypt(buf, pass) {
     const bytes = new Uint8Array(buf);
@@ -33,17 +48,16 @@
       base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
     );
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, concat(body, tag));
-    return td.decode(plain);
+    return td.decode(await gunzip(new Uint8Array(plain)));
   }
-  function concat(a, b) {
-    const out = new Uint8Array(a.length + b.length);
-    out.set(a, 0); out.set(b, a.length);
-    return out;
-  }
-  async function grab(path) {
-    const r = await fetch(path, { cache: 'force-cache' });
-    if (!r.ok) throw new Error(path + ' → HTTP ' + r.status);
+
+  async function grab(name) {
+    const r = await fetch(BASE + name, { cache: 'force-cache' });
+    if (!r.ok) throw new Error(name + ' → HTTP ' + r.status);
     return r.arrayBuffer();
+  }
+  async function grabJson(name, pass) {
+    return JSON.parse(await decrypt(await grab(name), pass || state.pass));
   }
 
   /* ---------- 口令界面 ---------- */
@@ -67,15 +81,16 @@
         const p = input.value.trim();
         if (!p) return;
         err.textContent = '解密中…'; err.style.color = '#7e8ea3';
-        localStorage.setItem(PASS_KEY, p);
         state.pass = p;
         try {
-          await loadCore();
+          await loadCore(true);
+          localStorage.setItem(PASS_KEY, p);
           box.remove();
           res();
         } catch (e) {
-          localStorage.removeItem(PASS_KEY);
           state.pass = '';
+          state.core = null;
+          state.loading = null;
           err.textContent = '口令不对'; err.style.color = '#8a6a6a';
         }
       };
@@ -85,17 +100,14 @@
     });
   }
 
-  /* ---------- 载入 core ---------- */
-  async function loadCore() {
-    if (state.core) return state.core;
-    if (state.loading) return state.loading;
+  /* ---------- core ---------- */
+  async function loadCore(force) {
+    if (state.core && !force) return state.core;
+    if (state.loading && !force) return state.loading;
     state.loading = (async () => {
-      if (!state.pass) { await askPass(); if (!state.core) return state.core; }
-      const buf = await grab('data/core.enc');
-      let json;
-      try { json = JSON.parse(await decrypt(buf, state.pass)); }
-      catch (e) { state.loading = null; throw e; }
-      const core = json;
+      if (!state.pass) { await askPass(); if (!state.core) return null; }
+      const core = await grabJson('core.enc');
+      state.nodeById.clear(); state.nodeByUid.clear();
       for (const n of core.graphs.real.nodes) { state.nodeById.set(n.id, n); state.nodeByUid.set(n.uid, n); }
       const v = core.vectors;
       const raw = Uint8Array.from(atob(v.data), (c) => c.charCodeAt(0));
@@ -103,16 +115,19 @@
       const map = new Map();
       v.ids.forEach((id, i) => map.set(id, flat.subarray(i * v.dim, (i + 1) * v.dim)));
       state.vecs = map;
+      state.events.clear();
       state.core = core;
       return core;
     })();
     return state.loading;
   }
 
-  async function ensureShard(i) {
-    if (state.shards.has(i)) return state.shards.get(i);
-    const json = JSON.parse(await decrypt(await grab('data/ev-' + i + '.enc'), state.pass));
-    state.shards.set(i, json);
+  async function eventOf(uid) {
+    if (state.events.has(uid)) return state.events.get(uid);
+    const name = state.core && state.core.index[uid];
+    if (!name) return null;
+    const json = await grabJson('ev/' + name);
+    state.events.set(uid, json);
     return json;
   }
 
@@ -140,13 +155,13 @@
     };
   }
 
-  /* ---------- 把 /api/* 接住 ---------- */
-  const json = (obj) => new Response(JSON.stringify(obj), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+  /* ---------- 接住 /api/* ---------- */
+  const json = (obj, code) => new Response(JSON.stringify(obj), { status: code || 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
 
   const realFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
-    if (!url.startsWith('/api/') && !url.includes('/api/')) return realFetch(input, init);
+    if (!url.includes('/api/')) return realFetch(input, init);
     const u = new URL(url, location.href);
     await loadCore();
     if (u.pathname === '/api/graph') return json(state.core.graphs[u.searchParams.get('mode') || 'real']);
@@ -157,14 +172,12 @@
     }
     if (u.pathname === '/api/event') {
       const uid = u.searchParams.get('uid');
-      const i = state.core.index[uid];
-      if (i === undefined) return new Response(JSON.stringify({ error: '没有这个点' }), { status: 404 });
-      const shard = await ensureShard(i);
-      return json(shard[uid]);
+      const ev = await eventOf(uid);
+      if (!ev) return json({ error: '没有这个点' }, 404);
+      return json(ev);
     }
-    return new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
+    return json({ error: 'not found' }, 404);
   };
 
-  // 先踢一脚：让口令框在画布空转之前就出来
   loadCore().catch(() => {});
 })();
