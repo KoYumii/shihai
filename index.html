@@ -1,0 +1,1099 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>识海</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #04060a; overflow: hidden; }
+  body {
+    font-family: "PingFang SC", "HarmonyOS Sans SC", "Source Han Sans SC", "Microsoft YaHei UI", system-ui, sans-serif;
+    font-weight: 200; color: #c9d4e3; -webkit-font-smoothing: antialiased;
+  }
+  #dust { position: fixed; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: manipulation; }
+  .title {
+    position: fixed; left: 34px; top: 28px; pointer-events: none; user-select: none;
+  }
+  .title h1 { margin: 0; font-size: 26px; font-weight: 200; letter-spacing: .34em; color: #eaf1fb; }
+  .title p { margin: 7px 0 0; font-size: 11px; letter-spacing: .18em; color: #5d6c82; }
+  .hud {
+    position: fixed; left: 34px; bottom: 26px; font-size: 11px; letter-spacing: .1em;
+    color: #55637a; display: flex; gap: 18px; align-items: center; user-select: none;
+  }
+  .hud b { font-weight: 300; color: #9fb0c7; }
+  .hud span.sep { opacity: .35; }
+  .panel {
+    position: fixed; top: 0; right: 0; height: 100%; width: 380px; max-width: 46vw;
+    background: rgba(6,9,14,.92); backdrop-filter: blur(14px);
+    border-left: 1px solid rgba(120,150,190,.13);
+    transform: translateX(101%); transition: transform .42s cubic-bezier(.2,.8,.2,1);
+    display: flex; flex-direction: column;
+  }
+  .panel.open { transform: none; }
+  .panel header { padding: 26px 24px 14px; border-bottom: 1px solid rgba(120,150,190,.1); }
+  .panel h2 { margin: 0; font-size: 15px; font-weight: 300; line-height: 1.5; color: #e6eefb; letter-spacing: .04em; }
+  .panel .sub { margin: 8px 0 0; font-size: 10.5px; letter-spacing: .12em; color: #5a6a80; }
+  .panel .log { overflow-y: auto; padding: 14px 24px 40px; flex: 1; scrollbar-width: thin; }
+  .panel .log::-webkit-scrollbar { width: 3px; }
+  .panel .log::-webkit-scrollbar-thumb { background: rgba(140,170,210,.22); }
+  .msg { margin: 0 0 13px; font-size: 12.5px; line-height: 1.66; color: #b9c6d8; }
+  .msg .who { font-size: 10px; letter-spacing: .1em; color: #4e5d73; margin-right: 7px; }
+  .msg.me .who { color: #6c8199; }
+  .msg .t { font-size: 9.5px; color: #3d4a5c; margin-right: 7px; }
+  .close {
+    position: absolute; right: 16px; top: 16px; width: 26px; height: 26px; border: 0; border-radius: 50%;
+    background: rgba(120,150,190,.1); color: #8b9cb3; font-size: 14px; cursor: pointer; line-height: 1;
+  }
+  .close:hover { background: rgba(120,150,190,.2); }
+  .empty { font-size: 12px; color: #4a5768; }
+
+  /* 手机：星图铺满、侧栏整屏、字要够大够清楚 */
+  @media (max-width: 760px) {
+    .title { left: 18px; top: 16px; }
+    .title h1 { font-size: 19px; letter-spacing: .3em; }
+    .title p { font-size: 9.5px; letter-spacing: .14em; }
+    .hud { left: 18px; right: 18px; bottom: 16px; gap: 9px; font-size: 10px; flex-wrap: wrap; }
+    .panel { width: 100%; max-width: none; }
+    .panel header { padding: 40px 18px 12px; }
+    .panel h2 { font-size: 16px; }
+    .panel .log { padding: 12px 18px 34px; }
+    .msg { font-size: 13.5px; line-height: 1.7; }
+    .close { right: 12px; top: 12px; width: 32px; height: 32px; font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="dust"></canvas>
+<canvas id="stage"></canvas>
+<div class="title">
+  <h1>识海</h1>
+</div>
+<div class="hud">
+  <span><b id="mode">真实</b></span><span class="sep">/</span>
+  <span id="count"></span><span class="sep">/</span>
+  <span id="focus">此刻 0 处心光</span><span class="sep">/</span>
+  <span id="hint">1 全亮 · 2 半衰 · 3 真实 · 点开看原话</span>
+</div>
+
+<aside class="panel" id="panel">
+  <button class="close" id="close" aria-label="关闭">×</button>
+  <header><h2 id="ptitle"></h2><p class="sub" id="psub"></p></header>
+  <div class="log" id="plog"></div>
+</aside>
+<script src="./boot.js"></script>
+<script>
+const MODE_NAME = { bright: '全亮', half: '半衰', real: '真实' };
+const TIERS = [
+  [0.25, '#e9f1ff'], [0.40, '#78e2a6'], [0.55, '#6fb4ff'],
+  [0.70, '#b58cff'], [0.85, '#ffab5e'], [9, '#ff6f6f'],
+];
+const tier = (imp) => TIERS.find(([t]) => imp < t)[1];
+
+const cvs = document.getElementById('stage');
+const ctx = cvs.getContext('2d');
+let dustBands = null;   // （旧版 5 条深度带的尘埃位图，已不用）
+
+let G = null, mode = 'real', W = 0, H = 0, DPR = 1;
+let dustBuf = null, dustCount = 0, dustMs = 0;
+let hover = null, hot = new Set(), near = new Set();
+// 悬停的照亮：从指针下一个小圈慢慢扩到整片，亮度跟着一起爬（不再是一步跳到亮）
+const ILLUM_MIN = 26;       // 刚移上去时照亮的半径（px）
+const ILLUM_MAX = 250;      // 扩到这就算到「现在这个范围」
+let hoverFade = 0;          // 0..1：整片的照亮强度/半径进度
+const dimv = new Map();     // uid → 平滑后的亮度系数（每颗自己也在爬）
+let lastDrawT = 0;
+let raf = 0, lastT = 0, acc = 0, tMs = 0;
+let R = 0, CX = 0, CY = 0;
+
+const pos = new Map();      // node.id → {x,y,r,sal,imp,...}（每帧重算）
+const anim = new Map();     // uid → {ang,rad}（当前渲染位置，向 target 缓慢靠）
+const info = new Map();     // uid → {r,sal,imp,faded,halo,title,at,m}
+let targets = new Map();    // uid → {ang,rad}（布局算出来的目标）
+let polar = [];             // 按序号排的 {ang,rad,m}，尘埃层靠它落位
+const sprites = new Map();  // tier 颜色 → 预渲染的光晕贴图
+
+/* ---------- 动起来的参数 ---------- */
+const TAU = Math.PI * 2;
+// 转速：她调这个只凭体感，所以留一个能现场拧的旋钮 —— 按 [ 慢一档、按 ] 快一档（15%），
+// 调过的值存 localStorage，下次打开还是你调的那个速度。
+const ROT_SPEED_KEY = 'shihai.rotScale';
+let rotScale = (() => { const v = Number(localStorage.getItem(ROT_SPEED_KEY)); return v > 0 ? v : 2.2; })();
+const ROT_PERIOD_BASE = 150000;              // 基准：绕竖轴一圈 150 秒
+const rotPeriod = () => ROT_PERIOD_BASE * rotScale;
+const pitchPeriod = () => 97000 * rotScale;  // 点头 / 侧倾跟着一起慢，不然慢下来的只有转向
+const rollPeriod = () => 127000 * rotScale;
+const PITCH_AMP = 0.30;     // 点头幅度（弧度）：只晃一晃，不翻个儿
+const ROLL_AMP = 0.26;      // 侧倾幅度
+const TURB = 4.6;           // 每个点自己的湍流幅度（像素），叠加起来十几像素
+const LERP_MS = 450;        // 切档时滑过去的时间常数
+// 体积：云是真正的三维一团（每个点有 x/y/z），镜头用三个角度慢慢翻滚，
+// 所以从任何角度看都是实的，不会再出现「一张纸」。
+const FOCAL = 2.2;          // 焦距（× R），越小透视越猛（太小会把近处的点放大到画面外）
+const LOBE = 0.34;          // 云的不规则程度：0 = 正球，越大越像真星云歪着长
+let rotAuto = 0, rotOff = 0, rotOffTarget = 0, pitchOff = 0, pitchOffTarget = 0, rollOff = 0, zoom = 1, zoomTarget = 1;
+
+const QS = new URLSearchParams(location.search);
+// 两套观感参数：默认为「锐」（小核心、细线、雾只做颗粒），?soft=1 是之前的柔光版
+const SOFT = QS.get('soft') === '1';
+const P = SOFT
+  ? { haze: 0.26, speck: 0.11, glowR: 3.4, glowA: 0.15, coreR: 0.42, edgeMax: 0.30, edgeBase: 0.030, edgeStep: 0.075, edgeW: 0.70, ringW: 1.10, dot: 0.86, dustA: 0.18 }
+  : { haze: 0.00, speck: 0.15, glowR: 1.85, glowA: 0.34, coreR: 0.26, edgeMax: 0.120, edgeBase: 0.012, edgeStep: 0.036, edgeW: 0.55, ringW: 0.80, dot: 0.95, dustA: 0.08 };
+const CENTER_NAME = QS.get('center') || '慈嗅嗅';   // 中心那个她（?center=名字 可换）
+const STILL = QS.get('still') === '1';        // 冻结：截图用，给一个确定的瞬间
+const T0 = Number(QS.get('t') || 0);
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  const r = cvs.getBoundingClientRect();
+  W = Math.max(1, Math.round(r.width || window.innerWidth));
+  H = Math.max(1, Math.round(r.height || window.innerHeight));
+  cvs.width = W * DPR; cvs.height = H * DPR;
+  grainCanvas = null;
+  R = Math.min(W * 0.44, H * 0.42);
+  CX = W * 0.5; CY = H * 0.5;
+}
+
+function layout() {
+  anim.clear();
+  info.clear();
+  targets = new Map();
+  pos.clear();
+  polar = [];
+  const nodes = G.nodes;
+  G.byId = new Map(nodes.map((x) => [x.id, x]));
+  const n = nodes.length || 1;
+  // 深度（遗忘）排名 → 离她多远：越重要越贴着她，越久远越沉到外圈。
+  // 排名而不是原值：原值挤在很窄一段里，直接用会挤成一道壳。
+  const order = [...nodes].sort((a, b) => a.depth - b.depth);
+  const rank = new Map(order.map((p, i) => [p.id, n > 1 ? i / (n - 1) : 0]));
+  const counts = nodes.map(x => x.m ?? 1);
+  const maxC = Math.max(1, ...counts);
+  // 云不是正球：几个大尺度的正弦叠出「一边厚一边薄」，再加一条斜着拖出去的尾巴。
+  // 这样每个角度都不一样，但任何角度看下去都是实的。
+  const tail = norm3(0.55, -0.35, 0.76);
+  for (const p of nodes) {
+    const rnd = (k) => { const v = Math.sin(p.i * 12.9898 + k) * 43758.5453; return v - Math.floor(v); };
+    const t = rank.get(p.id) ?? 0;
+    // 单位球面上的斐波那契分布：铺得匀，不挤两极，也没有经纬线
+    const gr = Math.PI * (3 - Math.sqrt(5));
+    const uy = 1 - 2 * ((p.i + 0.5) / n);
+    const sr = Math.sqrt(Math.max(0, 1 - uy * uy));
+    const th = gr * p.i;
+    let dx = Math.cos(th) * sr, dy = uy, dz = Math.sin(th) * sr;
+    dx += (rnd(1) - 0.5) * 0.24; dy += (rnd(2) - 0.5) * 0.24; dz += (rnd(3) - 0.5) * 0.24;
+    const dl = Math.hypot(dx, dy, dz) || 1; dx /= dl; dy /= dl; dz /= dl;
+    const az = Math.atan2(dz, dx), inc = Math.acos(Math.max(-1, Math.min(1, dy)));
+    let lobe = 1
+      + LOBE * Math.sin(2.3 * az + 0.9) * Math.cos(1.7 * inc)
+      + 0.55 * LOBE * Math.sin(3.7 * az + 2.2) * Math.sin(2.9 * inc + 0.4);
+    const along = dx * tail[0] + dy * tail[1] + dz * tail[2];
+    if (along > 0.45) lobe += (along - 0.45) * (0.9 + 0.5 * rnd(4));   // 尾巴：朝一个方向拖出去
+    // 半径按 sqrt 铺开（体积才均匀，不会挤成一层壳），最外留一点散开
+    const rad = (0.10 + 0.90 * Math.sqrt(t)) * lobe * R;
+    // 大小还按聊了多少，但最小和最大拉近，远的小点不会小成一把沙
+    const r = (2.6 + 2.9 * Math.sqrt((p.m ?? 1) / maxC)) * (p.faded ? 0.78 : 1);
+    polar[p.i] = { x: dx * rad / R, y: dy * rad / R, z: dz * rad / R, m: p.m ?? 1 };
+    info.set(p.uid, {
+      r, sal: p.salience, imp: p.importance, core: p.core, m: p.m ?? 1,
+      halo: !!p.halo, faded: !!p.faded, title: p.title, at: p.at,
+    });
+    const v3 = { x: dx * rad, y: dy * rad, z: dz * rad };
+    targets.set(p.uid, v3);
+    anim.set(p.uid, { ...v3 });
+  }
+}
+
+function norm3(x, y, z) { const l = Math.hypot(x, y, z) || 1; return [x / l, y / l, z / l]; }
+
+/** 三个角度的旋转矩阵（行主序 9 个数）：v' = Ry · Rx · Rz · v */
+function rotMatrix(yaw, pitch, roll) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  return [
+    cy * cr + sy * sp * sr, -cy * sr + sy * sp * cr, sy * cp,
+    cp * sr, cp * cr, -sp,
+    -sy * cr + cy * sp * sr, sy * sr + cy * sp * cr, cy * cp,
+  ];
+}
+
+/** 当前镜头朝向：绕竖轴一直转，前后点头与侧倾各自慢晃（不成周期、看不出「转一圈」） */
+function curM() {
+  return rotMatrix(rotAuto + rotOff,
+    pitchOff + PITCH_AMP * Math.sin(tMs * TAU / pitchPeriod()),
+    rollOff + ROLL_AMP * Math.sin(tMs * TAU / rollPeriod() + 1.1));
+}
+
+
+/* 语义相近：连线之外还有另一种「像」——向量库找出来的那几段，和被指的这颗一起亮。
+   结果按 uid 缓存，同一个点只问一次后端。 */
+const semCache = new Map();
+async function applySimilar(id) {
+  const node = G && G.byId.get(id);
+  if (!node || !node.uid) return;
+  let arr = semCache.get(node.uid);
+  if (arr === undefined) {
+    arr = [];
+    try {
+      const r = await fetch('/api/similar?uid=' + encodeURIComponent(node.uid) + '&k=6&min=0.70');
+      const j = await r.json();
+      arr = (j.items || []).map((x) => Number(x.id));
+    } catch { arr = []; }
+    semCache.set(node.uid, arr);
+  }
+  if (hover !== id) return;            // 等的这会儿指针已经走了
+  for (const sid of arr) if (sid !== id) hot.add(sid);
+}
+
+/* ---------- 每帧：先让位置走一步 ---------- */
+function stepMotion(dt) {
+  tMs += dt;
+  const k = 1 - Math.exp(-dt / LERP_MS);
+  if (!dragging) rotAuto += dt * (TAU / rotPeriod());
+  rotOff += (rotOffTarget - rotOff) * k;
+  pitchOff += (pitchOffTarget - pitchOff) * k;
+  zoom += (zoomTarget - zoom) * k;
+  for (const p of G.nodes) {
+    const tg = targets.get(p.uid), a = anim.get(p.uid);
+    if (!tg || !a) continue;
+    a.x += (tg.x - a.x) * k;
+    a.y += (tg.y - a.y) * k;
+    a.z += (tg.z - a.z) * k;
+  }
+}
+
+/**
+ * 位置 = 布局位置（三维一团）+ 每个点自己的湍流 + 整个云三个角度慢慢翻滚 + 透视。
+ * 湍流用几个不同周期的正弦叠起来：没有明显周期感，像被看不见的气流推着。
+ * 因为云本身有厚度，镜头转到任何角度都是实的，不会再变成一张纸。
+ */
+function computePositions() {
+  const M = curM();
+  const F = FOCAL;
+  const out = [];
+  for (const p of G.nodes) {
+    const a = anim.get(p.uid), inf = info.get(p.uid);
+    if (!a || !inf) continue;
+    const i = p.i;
+    const ox = TURB * (Math.sin(tMs * 0.00019 + i * 1.7)
+                     + 0.5 * Math.sin(tMs * 0.000061 + i * 0.31)
+                     + 0.25 * Math.sin(tMs * 0.00037 + i * 3.1)) / R;
+    const oy = TURB * (Math.cos(tMs * 0.00023 + i * 2.3)
+                     + 0.5 * Math.sin(tMs * 0.000083 + i * 0.57)
+                     + 0.25 * Math.cos(tMs * 0.00041 + i * 1.3)) / R;
+    const oz = TURB * (Math.sin(tMs * 0.00017 + i * 2.9)
+                     + 0.5 * Math.cos(tMs * 0.000071 + i * 0.73)
+                     + 0.25 * Math.sin(tMs * 0.00031 + i * 4.3)) / R;
+    // 全部换成「R 为单位」再旋转：
+    const x = a.x / R + ox, y = a.y / R + oy, z = a.z / R + oz;
+    const xr = M[0] * x + M[1] * y + M[2] * z;
+    const ty = M[3] * x + M[4] * y + M[5] * z;
+    const tz = M[6] * x + M[7] * y + M[8] * z;
+    const s = Math.min(1.55, F / (F + Math.max(-0.8, Math.min(0.7, tz))));   // 透视：靠前大、靠后小（夹住上限，别把点甩出画面）
+    const dsh = Math.max(0.50, Math.min(1.06, 0.86 - tz * 0.26));   // 深处的暗一点
+    pos.set(p.id, {
+      x: CX + xr * s * R * zoom,
+      y: CY + ty * s * R * zoom,
+      r: Math.min(15, inf.r * s * zoom),
+      dep: tz, s, dsh,
+      sal: inf.sal, imp: inf.imp, halo: inf.halo,
+      faded: inf.faded, title: inf.title,
+    });
+    out.push(p.id);
+  }
+  // 远的先画，近的后画：前后遮挡就出来了
+  out.sort((A, B) => pos.get(B).dep - pos.get(A).dep);
+  return out;
+}
+
+function spriteFor(col) {
+  let s = sprites.get(col);
+  if (s) return s;
+  const S = 64;
+  s = document.createElement('canvas');
+  s.width = s.height = S;
+  const g2 = s.getContext('2d');
+  const gr = g2.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  gr.addColorStop(0, hexA(col, 0.85));
+  gr.addColorStop(0.22, hexA(col, 0.26));
+  gr.addColorStop(0.55, hexA(col, 0.05));
+  gr.addColorStop(1, hexA(col, 0));
+  g2.fillStyle = gr;
+  g2.fillRect(0, 0, S, S);
+  sprites.set(col, s);
+  return s;
+}
+
+/* ---------- 雾（软气团）已停用：改成真实三维的雪与光点，代码已移除 ---------- */
+
+function render() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (!G) return;
+  const drawOrder = computePositions();
+  // 指针停在她身上（中心那颗）时：其他点压暗，只留她亮，并浮出名字
+  const centerHot = !SOFT && (QS.get('cent') === '1' ||
+    (ptr != null && Math.hypot(ptr.x - CX, ptr.y - CY) < Math.max(26, R * 0.075)));
+
+  // 深处的她：只有一颗白点，不放任何铺满画面的暖光（那层暖光是「底发灰」的主因）。
+  if (SOFT) {
+    const coreR = R * P.coreR * (1 + 0.02 * Math.sin(tMs * 0.00017));
+    const core = ctx.createRadialGradient(CX, CY, 0, CX, CY, coreR);
+    core.addColorStop(0, 'rgba(255,251,242,.97)');
+    core.addColorStop(.04, 'rgba(255,239,214,.80)');
+    core.addColorStop(.13, 'rgba(255,216,168,.34)');
+    core.addColorStop(.42, 'rgba(255,188,124,.10)');
+    core.addColorStop(1, 'rgba(255,170,90,0)');
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(CX, CY, coreR, 0, 7); ctx.fill();
+  } else {
+    const br0 = 1 + 0.09 * Math.sin(tMs * 0.0011);
+    const cr = Math.max(4.2, R * 0.030) * br0;
+    // 极紧的一圈白：只到 2.6 倍点半径，不许铺出去
+    const g0 = ctx.createRadialGradient(CX, CY, 0, CX, CY, cr * 2.6);
+    g0.addColorStop(0, 'rgba(255,255,255,.55)');
+    g0.addColorStop(.34, 'rgba(255,250,238,.16)');
+    g0.addColorStop(1, 'rgba(255,240,220,0)');
+    ctx.fillStyle = g0;
+    ctx.beginPath(); ctx.arc(CX, CY, cr * 2.6, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.97)';
+    ctx.beginPath(); ctx.arc(CX, CY, cr, 0, 7); ctx.fill();
+  }
+
+  // 原意识：按 24 个方位各挑最深的一颗拉出光丝，四面八方都得有
+  const sector = new Map();
+  for (const p of G.nodes) {
+    const q = pos.get(p.id);
+    if (!q) continue;
+    const ang = Math.atan2(q.y - CY, q.x - CX);
+    const k = Math.floor(((ang + Math.PI) / (Math.PI * 2)) * 24) % 24;
+    const s = (info.get(p.uid)?.core || 0) * Math.pow(Math.min(1, q.sal * 3), 0.5);
+    const arr = sector.get(k) ?? [];
+    arr.push({ q, s });
+    sector.set(k, arr);
+  }
+  const rays = [...sector.values()].flatMap(arr => arr.sort((a, b) => b.s - a.s).slice(0, 1)).sort((a, b) => b.s - a.s);
+  ctx.lineWidth = SOFT ? 0.8 : 0.95;
+  const r0 = R * 0.075;    // 光丝从离中心一小段开始，别在正中间挤成一个白点
+  for (const { q, s } of rays) {
+    const a = SOFT ? 0.05 + 0.22 * Math.min(1, s) : 0.10 + 0.34 * Math.min(1, s);
+    const dx = q.x - CX, dy = q.y - CY;
+    const len = Math.hypot(dx, dy) || 1;
+    const sx = CX + dx / len * r0, sy = CY + dy / len * r0;
+    const grd = ctx.createLinearGradient(sx, sy, q.x, q.y);
+    grd.addColorStop(0, 'rgba(255,242,220,0)');
+    grd.addColorStop(.22, 'rgba(255,242,220,' + (a * 1.1).toFixed(3) + ')');
+    grd.addColorStop(.62, 'rgba(230,232,255,' + (a * 0.30).toFixed(3) + ')');
+    grd.addColorStop(.9, 'rgba(190,215,255,0)');
+    ctx.strokeStyle = grd;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(q.x, q.y); ctx.stroke();
+  }
+
+  if (SOFT) {
+    // 老柔光版：还是那张 2D 的颗粒底图（现在也按三维投出来撒）
+    if (paintGrain()) {
+      ctx.save();
+      ctx.globalAlpha = 0.72;
+      ctx.drawImage(grainCanvas, 0, 0, W, H);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+  } else {
+    // 雪：几万颗 1px 的点，在三维的云里慢慢飘，靠近她那里更亮。
+    // （WebGL 拿不到时退回 2D 底图：位置也是按同一套三维透视投出来的）
+    if (!drawDustGL(centerHot)) if (paintGrain()) {
+      ctx.save();
+      ctx.globalAlpha = (centerHot ? 0.30 : 0.72) * (1 - 0.34 * hoverFade);
+      ctx.drawImage(grainCanvas, 0, 0, W, H);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // 边：按透明度分成几桶批量描，几千条线每帧也只 stroke 八次
+  const EB = [[], [], [], []], RB = [[], [], [], []];
+  for (const e of G.edges) {
+    const A = pos.get(e.a), B = pos.get(e.b);
+    if (!A || !B) continue;
+    const s = Math.min(A.sal, B.sal);
+    if (s <= 0.004) continue;
+    let a = Math.min(SOFT ? 0.30 : 0.26, P.edgeBase + 0.42 * e.w * Math.min(1, s * 1.6));
+    if (hover != null && hoverFade > 0.01) {
+      // 悬停时：连着指针那颗的线亮起来，其余按照亮进度压暗（不是一步跳过去）
+      a = (hot.has(e.a) && hot.has(e.b)) ? a * (1 + 0.55 * hoverFade) : a * (1 - 0.90 * hoverFade);
+    }
+    if (centerHot) a *= 0.10;
+    const bi = Math.max(0, Math.min(3, Math.floor(a / P.edgeStep)));
+    (e.k === 'resonance' ? RB : EB)[bi].push(A.x, A.y, B.x, B.y);
+  }
+  // 强弱拉开：弱的几乎看不见，强的要能一眼跟出来
+  const EDGE_ALPHA = SOFT ? [0.03, 0.105, 0.18, 0.255] : [0.016, 0.055, 0.105, 0.175];
+  for (let b = 0; b < 4; b++) {
+    const al = EDGE_ALPHA[b];
+    for (const [bucket, col] of [[EB[b], '150,182,225'], [RB[b], '178,150,255']]) {
+      if (!bucket.length) continue;
+      ctx.strokeStyle = 'rgba(' + col + ',' + al.toFixed(3) + ')';
+      ctx.lineWidth = (col === '178,150,255' ? 1.15 : 1) * P.edgeW;
+      ctx.beginPath();
+      for (let i = 0; i < bucket.length; i += 4) {
+        ctx.moveTo(bucket[i], bucket[i + 1]);
+        ctx.lineTo(bucket[i + 2], bucket[i + 3]);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // 光点：远的先画、近的后画（computePositions 已经按深度排好）
+  // 悬停照亮分两步走：照亮半径从 ILLUM_MIN 扩到 ILLUM_MAX，同时每颗自己的亮度也在爬。
+  const dtF = Math.max(1, Math.min(64, tMs - lastDrawT || 33));
+  lastDrawT = tMs;
+  const kd = 1 - Math.exp(-dtF / 190);
+  const fadeTau = hover == null ? 210 : 560;     // 亮起来慢、暗回去稍快
+  hoverFade += ((hover == null ? 0 : 1) - hoverFade) * (1 - Math.exp(-dtF / fadeTau));
+  const illumR = ILLUM_MIN + (ILLUM_MAX - ILLUM_MIN) * hoverFade;
+  const hoverPos = hover != null ? pos.get(hover) : null;
+  const icx = ptr ? ptr.x : (hoverPos ? hoverPos.x : CX);
+  const icy = ptr ? ptr.y : (hoverPos ? hoverPos.y : CY);
+
+  for (const id of drawOrder) {
+    const q = pos.get(id);
+    if (!q) continue;
+    const p = G.byId.get(id);
+    const col = tier(q.imp);
+    const lit = 0.20 + 0.80 * Math.min(1, Math.pow(q.sal, 0.40));
+    const isHot = hover != null && hot.has(p.id);
+    // 目标亮度：光圈扫到哪里哪里就亮一点（手电筒），但关系决定亮多少 —
+    // 被指的那颗 1、一级连接/同一天 0.55、扫到的无关点只亮一丝 0.30，边缘 70px 羽化。
+    let tgt = 1;
+    if (hover != null) {
+      const dd = Math.hypot(q.x - icx, q.y - icy);
+      const gate = Math.max(0, Math.min(1, (illumR - dd) / 70));
+      const full = isHot ? 1 : (near.has(p.id) ? 0.55 : 0.30);
+      tgt = 0.12 + (full - 0.12) * gate;
+    }
+    const prevDim = dimv.has(id) ? dimv.get(id) : tgt;
+    // 停住不动时整片极缓地一起起伏（~15 秒一轮、±11%），像光在浅浅地流
+    const breathe = 1 + 0.11 * hoverFade * Math.sin(tMs * 0.00042);
+    const dim = (prevDim + (tgt - prevDim) * kd) * breathe;
+    dimv.set(id, dim);
+    const hv = Math.max(0, Math.min(1, (dim - 0.12) / 0.88));       // 0=暗着 1=全亮
+    let alpha = (q.faded ? 0.14 : lit) * dim * (q.dsh ?? 1);
+    if (centerHot) alpha *= 0.14;
+    const rr = q.r * P.glowR * (1 + 0.30 * hv);
+    if (SOFT) {
+      if (q.sal > 0.02) {
+        ctx.globalAlpha = P.glowA * alpha;
+        ctx.drawImage(spriteFor(col), q.x - rr, q.y - rr, rr * 2, rr * 2);
+        ctx.globalAlpha = 1;
+      }
+      const dotR0 = q.r * (isHot ? 1.25 : 1);
+      ctx.fillStyle = hexA(col, alpha * P.dot);
+      ctx.beginPath(); ctx.arc(q.x, q.y, dotR0, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.30 * alpha).toFixed(3) + ')';
+      ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(0.55, dotR0 * 0.42), 0, 7); ctx.fill();
+    } else {
+      // LED 灯珠：整片有一道行波扫过（成片起伏），灯珠自己饱和实心、边界清楚，
+      // 外面只包一圈很薄的光；中心用同一个色相更亮的一档，绝不掺白。
+      // 一颗光点：外面一团柔光，中间一个小而实的亮芯，同一个颜色，不掺白、不套环
+      const wave = waveAt(q.x, q.y);
+      const bri = Math.min(1, alpha * (0.62 + 0.95 * wave));
+      if (bri > 0.015) {
+        const gw = q.r * 2.4 * (1 + 0.30 * hv);
+        ctx.globalAlpha = Math.min(0.92, 0.74 * bri);
+        ctx.drawImage(spriteFor(col), q.x - gw, q.y - gw, gw * 2, gw * 2);
+        ctx.globalAlpha = Math.min(1, 0.34 + 0.66 * bri);
+        ctx.fillStyle = hexA(col, Math.min(1, 0.58 + 0.42 * bri));
+        ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(0.75, q.r * 0.42), 0, 7); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      alpha = bri;
+    }
+    if (q.halo) {
+      ctx.strokeStyle = hexA(col, (SOFT ? 0.42 : 0.22) * alpha + (SOFT ? 0.12 : 0.03));
+      ctx.lineWidth = SOFT ? 1.1 : 0.6;
+      ctx.beginPath(); ctx.arc(q.x, q.y, q.r + 4.5 + 2.2 * Math.sin(q.sal * 7 + tMs * 0.0004), 0, 7); ctx.stroke();
+    }
+  }
+
+  if (centerHot) {
+    const ty0 = CY - Math.max(36, R * 0.078);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.font = '600 15px "PingFang SC","Microsoft YaHei",system-ui,sans-serif';
+    const nw = ctx.measureText(CENTER_NAME).width;
+    ctx.fillStyle = 'rgba(4,6,10,.62)';
+    ctx.fillRect(CX - nw / 2 - 7, ty0 - 16, nw + 14, 20);
+    ctx.fillStyle = 'rgba(255,246,230,.96)';
+    ctx.fillText(CENTER_NAME, CX, ty0);
+  }
+  if (hover != null && hoverFade > 0.02) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, hoverFade * 1.15);
+    drawLabels();
+    ctx.restore();
+  }
+}
+
+// 开发用：模拟一次悬停（截图/调参时用），能看清照亮是怎么从小圈扩开的
+window.__hover = (i, resetTo = 0.12) => {
+  if (!G || !G.nodes[i]) return null;
+  hover = G.nodes[i].id;
+  neighborhood(hover);
+  hoverFade = 0;
+  for (const k of dimv.keys()) dimv.set(k, resetTo);
+  applySimilar(hover);
+  return hover;
+};
+// 开发用：看转速（rad/s 与一圈多少秒），也方便量改完到底慢了多少
+window.__rot = () => ({ rotAuto, scale: rotScale, periodSec: +(rotPeriod() / 1000).toFixed(1) });
+window.__findUid = (u) => { const n = [...G.byId.values()].find((x) => x.uid === u); return n ? { id: n.id, i: n.i } : null; };
+window.__hoverState = () => ({
+  hover, fade: +hoverFade.toFixed(3),
+  illumR: +(ILLUM_MIN + (ILLUM_MAX - ILLUM_MIN) * hoverFade).toFixed(1),
+  hot: [...hot].map((k) => G.byId.get(k)?.uid).filter(Boolean),
+  dims: [...dimv.entries()].slice(0, 5).map(([k, v]) => [+v.toFixed(2), G.byId.get(k)?.title]),
+});
+
+// 开发用：量一帧到底多贵（截图/调参时用，不影响正常使用）
+window.__bench = (n = 40) => {
+  const t0 = performance.now();
+  for (let i = 0; i < n; i++) { tMs += 33; computePositions(); render(); }
+  return (performance.now() - t0) / n;
+};
+
+function drawLabels() {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  const placed = [];
+  // 只给指针附近的一级连接贴标题：离太远的一起显示会把字叠成一团
+  const hp = pos.get(hover);
+  const nearHot = [...hot]
+    .filter((id) => id !== hover && pos.get(id) && hp &&
+      (pos.get(id).x - hp.x) ** 2 + (pos.get(id).y - hp.y) ** 2 < 240 * 240)
+    .sort((a, b) => ((pos.get(a).x - hp.x) ** 2 + (pos.get(a).y - hp.y) ** 2) -
+                    ((pos.get(b).x - hp.x) ** 2 + (pos.get(b).y - hp.y) ** 2))
+    .slice(0, 8);
+  // 指针那颗最后画，别被邻居的标题盖住
+  const order = [...nearHot, hover];
+  for (const id of order) {
+    const q = pos.get(id);
+    if (!q) continue;
+    const isCore = id === hover;
+    ctx.font = (isCore ? '300 13px' : '200 11px') + ' "PingFang SC","Microsoft YaHei UI",sans-serif';
+    const w = ctx.measureText(q.title).width;
+    const h = isCore ? 15 : 13;
+    const x0 = q.x - w / 2 - 5, y0 = q.y - q.r - (isCore ? 12 : 10) - h;
+    const box = [x0, y0, x0 + w + 10, y0 + h + 4];
+    if (placed.some((b) => !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]))) continue;
+    placed.push(box);
+    // 一层极淡的底：字压在星点上也能读
+    ctx.fillStyle = 'rgba(4,6,10,.62)';
+    ctx.fillRect(box[0], box[1], box[2] - box[0], box[3] - box[1]);
+    ctx.fillStyle = isCore ? 'rgba(240,247,255,.98)' : 'rgba(196,212,232,.80)';
+    ctx.fillText(q.title, q.x, q.y - q.r - (isCore ? 9 : 7));
+  }
+}
+
+
+/* ---------- 尘埃：WebGL 粒子（真正会飘的雪） ---------- */
+let dcv = null, dgl = null, dprog = null, dVBO = null, dPts = 0, dUni = {}, dOk = false;
+const DUST_N = 45000;      // 几万颗，1px，靠密形成带子
+const DUST_DRIFT = 9.0;    // （旧版风的速度，现在雪是三维慢飘，已不用）
+const DUST_JIT = 5.0;      // 每颗自己的小随机幅度（px/s 级别的漂移）
+
+function initDustGL() {
+  if (dgl) return true;
+  dcv = document.getElementById('dust');
+  if (!dcv) return false;
+  const gl = dcv.getContext('webgl', { alpha: true, antialias: false, premultipliedAlpha: true, depth: false });
+  if (!gl) return false;
+  const vs = `attribute vec3 aPos; attribute vec3 aSeed;
+uniform mat3 uRot;
+uniform float uTime, uZoom, uR, uCX, uCY, uFocal, uDpr, uJit, uSize, uBright, uDim;
+uniform vec2 uView;
+varying float vB;
+void main() {
+  float ph = aSeed.x * 6.2831853;
+  // 每颗自己慢慢飘：云里的雪不是绕轨道跑，是被看不见的流推着走
+  vec3 p = aPos + vec3(
+    sin(uTime * 0.19 + ph * 2.3),
+    sin(uTime * 0.16 + aSeed.y * 6.1),
+    cos(uTime * 0.21 + aSeed.z * 7.7)) * uJit;
+  vec3 q = uRot * p;                                  // 跟着整个云一起翻滚
+  float s = min(1.55, uFocal / (uFocal + clamp(q.z, -0.85, 0.75)));
+  vec2 sc = vec2(uCX + q.x * s * uR * uZoom, uCY + q.y * s * uR * uZoom);
+  gl_Position = vec4(sc / uView * 2.0 - 1.0, 0.0, 1.0);
+  gl_Position.y = -gl_Position.y;
+  float dist = length(p);
+  float near = 0.34 + 0.74 * exp(-dist * 1.55);       // 靠近她那里更亮
+  float edge = 1.0 - smoothstep(0.80, 1.32, dist);    // 云外淡淡收掉
+  float jitter = 0.45 + 0.75 * fract(aSeed.x * 7.31);
+  float shimmer = 0.86 + 0.30 * sin(uTime * 0.9 + ph * 7.0);
+  vB = clamp(near * edge * jitter * shimmer, 0.0, 1.4) * uBright * uDim;
+  gl_PointSize = max(1.0, uSize * uDpr * s);
+  if (uBright > 900.0) { gl_PointSize = 6.0; vB = 1.0; }   // 调试：?dust=999 看几何在不在画面里
+}`;
+  const fsSrc = `precision mediump float;
+varying float vB;
+uniform vec3 uColor;
+void main() {
+  float a = clamp(vB, 0.0, 1.0) * 0.30;
+  gl_FragColor = vec4(uColor * a, a);
+}`;
+  const mk = (type, src) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) { console.warn(gl.getShaderInfoLog(sh)); return null; }
+    return sh;
+  };
+  const v = mk(gl.VERTEX_SHADER, vs), f = mk(gl.FRAGMENT_SHADER, fsSrc);
+  if (!v || !f) return false;
+  const pr = gl.createProgram();
+  gl.attachShader(pr, v); gl.attachShader(pr, f); gl.linkProgram(pr);
+  if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) { console.warn(gl.getProgramInfoLog(pr)); return false; }
+  gl.useProgram(pr);
+  for (const n of ['uTime','uRot','uZoom','uR','uCX','uCY','uFocal','uDpr','uJit','uSize','uBright','uDim','uView','uColor']) {
+    dUni[n] = gl.getUniformLocation(pr, n);
+  }
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);            // 加色（颜色已预乘）：密的地方自然更亮
+  gl.disable(gl.DEPTH_TEST);
+  dgl = gl; dprog = pr; dOk = true;
+  return true;
+}
+
+/** 高斯随机（Box–Muller，用索引当种子，结果稳定可复现） */
+function gauss(i, s) {
+  const u = Math.max(1e-6, Math.abs(Math.sin(i * 12.9898 + s * 7.1) * 43758.5453) % 1);
+  const v = Math.abs(Math.sin(i * 78.233 + s * 3.1) * 12345.6789) % 1;
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// 按真实消息撒：聊得多的那团雪厚，聊得少的地方稀；再掺一层飘得远的松雪撑体积
+function buildDustPoints() {
+  if (!initDustGL()) return;
+  if (!dustBuf || !dustCount || !polar.length) return;
+  const N = Math.min(DUST_N, dustCount);
+  const step = Math.max(1, Math.floor(dustCount / N));
+  const arr = new Float32Array(N * 6);
+  let k = 0;
+  for (let i = 0; i < dustCount && k < N; i += step) {
+    const ni = dustBuf[i * 3] | (dustBuf[i * 3 + 1] << 8);
+    const a = polar[ni];
+    if (!a) continue;
+    // 三条里有一条撒得远：贴事件的细雪 + 飘在云里的松雪，两种才有体积
+    const ambient = (i % 3 === 0);
+    const sig = ambient ? 0.11 : 0.012 + 0.05 * Math.sqrt(Math.min(1, (a.m || 1) / 220));
+    let x = a.x + gauss(i, 1) * sig, y = a.y + gauss(i, 2) * sig, z = a.z + gauss(i, 3) * sig;
+    const lim = 1.34, r0 = Math.hypot(x, y, z);
+    if (r0 > lim) { const f2 = lim / r0; x *= f2; y *= f2; z *= f2; }   // 不许散到云外
+    arr[k * 6] = x; arr[k * 6 + 1] = y; arr[k * 6 + 2] = z;
+    arr[k * 6 + 3] = Math.abs(Math.sin(i * 3.7) * 9301.7) % 1;
+    arr[k * 6 + 4] = Math.abs(Math.sin(i * 7.1 + 2.3) * 5021.3) % 1;
+    arr[k * 6 + 5] = Math.abs(Math.sin(i * 5.3 + 9.1) * 7919.7) % 1;
+    k++;
+  }
+  dPts = k;
+  window.__dustArr = arr;
+  if (!dVBO) dVBO = dgl.createBuffer();
+  dgl.bindBuffer(dgl.ARRAY_BUFFER, dVBO);
+  dgl.bufferData(dgl.ARRAY_BUFFER, arr, dgl.STATIC_DRAW);
+  const st = 24;
+  const aPos = dgl.getAttribLocation(dprog, 'aPos');
+  const aSeed = dgl.getAttribLocation(dprog, 'aSeed');
+  dgl.enableVertexAttribArray(aPos);
+  dgl.vertexAttribPointer(aPos, 3, dgl.FLOAT, false, st, 0);
+  dgl.enableVertexAttribArray(aSeed);
+  dgl.vertexAttribPointer(aSeed, 3, dgl.FLOAT, false, st, 12);
+}
+
+function drawDustGL(dim) {
+  if (!dOk || !dPts) return false;
+  const gl = dgl;
+  if (dcv.width !== W * DPR || dcv.height !== H * DPR) { dcv.width = W * DPR; dcv.height = H * DPR; }
+  gl.viewport(0, 0, dcv.width, dcv.height);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(dprog);
+  const M = curM();
+  gl.uniformMatrix3fv(dUni.uRot, false, new Float32Array([M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]]));
+  gl.uniform1f(dUni.uTime, tMs * 0.001);
+  gl.uniform1f(dUni.uZoom, zoom);
+  gl.uniform1f(dUni.uR, R);
+  gl.uniform1f(dUni.uCX, CX);
+  gl.uniform1f(dUni.uCY, CY);
+  gl.uniform1f(dUni.uFocal, FOCAL);
+  gl.uniform1f(dUni.uDpr, DPR);
+  gl.uniform1f(dUni.uJit, DUST_JIT / Math.max(1, R));
+  gl.uniform1f(dUni.uSize, 1.0);
+  gl.uniform1f(dUni.uBright, Number(QS.get('dust') || 1));
+  gl.uniform1f(dUni.uDim, dim ? 0.42 : 1.0);
+  gl.uniform2f(dUni.uView, W, H);
+  gl.uniform3f(dUni.uColor, 0.66, 0.76, 0.96);
+  gl.bindBuffer(gl.ARRAY_BUFFER, dVBO);
+  gl.drawArrays(gl.POINTS, 0, dPts);
+  window.__dustDebug = { err: gl.getError(), pts: dPts, vis: true };
+  return true;
+}
+
+/* ---------- 尘埃层（静态底图，按 mode 画一次） ---------- */
+/** 把一个「R 为单位」的云内坐标投到屏幕（给 2D 兜底用，和 WebGL 那套同一套透视） */
+function projVol(x, y, z) {
+  const M = curM();
+  const xr = M[0] * x + M[1] * y + M[2] * z;
+  const ty = M[3] * x + M[4] * y + M[5] * z;
+  const tz = M[6] * x + M[7] * y + M[8] * z;
+  const s = FOCAL / (FOCAL + Math.max(-0.8, Math.min(0.7, tz)));
+  return [CX + xr * s * R * zoom, CY + ty * s * R * zoom];
+}
+
+function dustXY(k) {
+  const ni = dustBuf[k * 3] | (dustBuf[k * 3 + 1] << 8);
+  const a = polar[ni];
+  if (!a) return null;
+  // 每条消息落在它所属事件的位置，再三维散开一点点
+  const sig = 0.02 + 0.06 * Math.sqrt(Math.min(1, (a.m || 1) / 220));
+  return projVol(a.x + gauss(k, 1) * sig, a.y + gauss(k, 2) * sig, a.z + gauss(k, 3) * sig);
+}
+let grainCanvas = null, grainBusy = false;
+
+/* 尘埃：贴着记忆之间的连线走，成一条条极淡的丝；其余撒成硬颗粒。
+   不要任何「按密度模糊」的底——那层是把画面糊成灰的主因。 */
+function nodeXY(id) {
+  const nd = G.byId.get(id);
+  if (!nd) return null;
+  const a = polar[nd.i];
+  if (!a) return null;
+  return projVol(a.x, a.y, a.z);
+}
+
+function paintGrain() {
+  if (grainCanvas) return grainCanvas;
+  if (!G || !polar.length || !W) return null;
+  const cv = document.createElement('canvas');
+  cv.width = W * DPR; cv.height = H * DPR;
+  const c2 = cv.getContext('2d');
+  c2.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const rnd = (i) => { const v = Math.sin(i * 12.9898 + 7.7) * 43758.5453; return v - Math.floor(v); };
+
+  // ① 细丝：每条连线上等距撒 1px 硬点，密到连成一条丝。边越强，丝越亮。
+  c2.fillStyle = 'rgb(152,182,232)';
+  let seed = 1;
+  for (const e of G.edges) {
+    const A = nodeXY(e.a), B = nodeXY(e.b);
+    if (!A || !B) continue;
+    const dx = B[0] - A[0], dy = B[1] - A[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 6) continue;
+    const nx = -dy / len, ny = dx / len;
+    // 只顺着「不长不短」的连线走丝：跨半张盘的长弦会变成一道划痕
+    if (len < 18 || len > 210) continue;
+    const cnt = Math.min(90, Math.max(4, Math.round(len / 3.2)));
+    c2.globalAlpha = 0.08 + 0.20 * Math.min(1, e.w || 0.5);
+    for (let j = 0; j < cnt; j++) {
+      const t = (j + 0.15 + 0.70 * rnd(seed++)) / cnt;   // 不等距，免得排成一把梳子
+      const off = (rnd(seed++) - 0.5) * 2.4;
+      c2.fillRect(A[0] + dx * t + nx * off, A[1] + dy * t + ny * off, 1, 1);
+    }
+  }
+
+  // ② 每段记忆周围再散一层：让丝和丝之间也有稀颗粒，不然只剩骨架
+  for (const nd of G.nodes) {
+    const a = polar[nd.i];
+    if (!a) continue;
+    const [cx, cy] = projVol(a.x, a.y, a.z);
+    const sig = 2.4 + 7.0 * Math.sqrt(Math.min(1, (a.m || 1) / 220));
+    c2.globalAlpha = 0.42;
+    for (let j = 0; j < 10; j++) {
+      const u1 = Math.max(1e-6, rnd(nd.i * 31 + j));
+      const u2 = rnd(nd.i * 17 + j * 7);
+      const rr = sig * Math.sqrt(-2 * Math.log(u1));
+      const th = 2 * Math.PI * u2;
+      c2.fillRect(cx + Math.cos(th) * rr, cy + Math.sin(th) * rr, 1, 1);
+    }
+  }
+
+  // ③ 空的地方：极淡的星点噪声（像夜空里很远的小星，不是一层灰）
+  const N = Math.round(W * H / 140);
+  c2.fillStyle = 'rgb(168,190,226)';
+  c2.globalAlpha = 0.10;
+  for (let i = 0; i < N; i++) {
+    c2.fillRect(rnd(i * 3 + 1) * W, rnd(i * 5 + 2) * H, 1, 1);
+  }
+  c2.globalAlpha = 1;
+  grainCanvas = cv;
+  return grainCanvas;
+}
+/* ---------- LED 灯珠的配色：同色更亮，不掺白 ---------- */
+function hslOf(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  const r = ((v >> 16) & 255) / 255, g = ((v >> 8) & 255) / 255, b = (v & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const l = (mx + mn) / 2;
+  let h = 0, s = 0;
+  const d = mx - mn;
+  if (d > 1e-6) {
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (mx === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  return { h, s, l };
+}
+const hslCss = (h, s, l, a) => 'hsla(' + (h * 360).toFixed(1) + ',' +
+  (s * 100).toFixed(1) + '%,' + (l * 100).toFixed(1) + '%,' + a.toFixed(3) + ')';
+const ledCache = new Map();
+function ledOf(hex) {
+  let c = ledCache.get(hex);
+  if (c) return c;
+  const { h, s, l } = hslOf(hex);
+  // 灯珠本体：饱和度顶上去、亮度压到「实心」那一档
+  c = {
+    base: hslCss(h, Math.min(1, Math.max(0.82, s)), Math.min(0.66, Math.max(0.52, l * 0.92)), 1),
+    // 芯：同一个色相，更亮更艳，但绝不往白里走
+    hot: hslCss(h, Math.min(1, Math.max(0.88, s)), Math.min(0.80, Math.max(0.66, l + 0.16)), 1),
+    glow: hslCss(h, Math.min(1, Math.max(0.80, s)), Math.min(0.72, Math.max(0.55, l)), 1),
+  };
+  ledCache.set(hex, c);
+  return c;
+}
+
+/* ---------- 雾团：会自己流的软块 ---------- */
+const GAS_COLORS = [[122, 156, 214], [156, 132, 226], [104, 172, 198]];
+// 成片起伏：盘上开过去的一道行波，整片区域一起亮一起暗
+function waveAt(x, y) {
+  const ax = (x - CX) / R, ay = (y - CY) / R;
+  const ang = Math.atan2(ay, ax), rad = Math.hypot(ax, ay);
+  const w1 = Math.sin(2.3 * ang + 3.4 * rad - tMs * 0.00052);
+  const w2 = Math.sin(1.25 * ang - 1.9 * rad + tMs * 0.00027 + 2.1);
+  return Math.max(0, Math.min(1, 0.5 + 0.32 * w1 + 0.18 * w2));
+}
+
+function hexA(hex, a) {
+  const v = parseInt(hex.slice(1), 16);
+  return 'rgba(' + ((v >> 16) & 255) + ',' + ((v >> 8) & 255) + ',' + (v & 255) + ',' +
+    Math.max(0, Math.min(1, a)).toFixed(3) + ')';
+}
+
+function findHover(mx, my) {
+  let best = null, bd = 20 * 20;
+  for (const p of G.nodes) {
+    const q = pos.get(p.id);
+    if (!q) continue;
+    const d = (q.x - mx) ** 2 + (q.y - my) ** 2;
+    if (d < bd) { bd = d; best = p.id; }
+  }
+  return best;
+}
+
+function neighborhood(id) {
+  hot = new Set([id]);
+  for (const e of G.edges) {
+    if (e.a === id) hot.add(e.b);
+    if (e.b === id) hot.add(e.a);
+  }
+  const me = G.nodes.find(n => n.id === id);
+  near = new Set();
+  if (me) {
+    const day = 864e5;
+    for (const n of G.nodes) if (Math.abs(n.at - me.at) < day) near.add(n.id);
+  }
+}
+
+/* ---------- 主循环：一直跑，30 帧上限 ---------- */
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  // 冻结模式：每帧都照同一个瞬间重画（窗口尺寸变化会清空画布，只画一次就白了）
+  if (STILL) { tMs = T0; render(); return; }
+  if (!lastT) lastT = now;
+  let dt = now - lastT;
+  lastT = now;
+  if (dt > 140) dt = 140;
+  acc += dt;
+  if (acc < 1000 / 30) return;   // 30 帧就够，剩下的算力留给机器
+  const step = Math.min(acc, 100);
+  acc = 0;
+  if (!G) return;
+  stepMotion(step);
+  render();
+}
+
+async function load(next) {
+  mode = next;
+  const r = await fetch('/api/graph?mode=' + mode);
+  G = await r.json();
+  layout();
+  document.getElementById('mode').textContent = MODE_NAME[mode];
+  document.getElementById('count').textContent = G.nodes.length + ' 处回忆';
+  hover = null; hot = new Set(); near = new Set();
+  grainCanvas = null;
+  if (dustBuf == null) await loadDust();
+  buildDustPoints();
+  if (!raf) raf = requestAnimationFrame(frame);
+  refreshGlow();
+}
+
+async function loadDust() {
+  try {
+    const r = await fetch('/api/dust');
+    const d = await r.json();
+    const bin = atob(d.bytes);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    dustBuf = buf; dustCount = d.count;
+    buildDustPoints();
+  } catch (e) { dustBuf = null; }
+}
+
+async function refreshGlow() {
+  try {
+    const r = await fetch('/api/glow');
+    const g = await r.json();
+    document.getElementById('focus').textContent = '此刻 ' + g.focus.length + ' 处心光';
+  } catch {}
+}
+
+/* ---------- 交互：拖、缩、点 ---------- */
+const pointers = new Map();
+let ptr = null;              // 指针当前位置：判断有没有停在中心那颗上
+let dragging = false;
+let dragXY = null, dragMoved = 0, pinch0 = null;
+
+cvs.addEventListener('pointerdown', (ev) => {
+  try { cvs.setPointerCapture(ev.pointerId); } catch {}
+  pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinch0 = { d: Math.hypot(a.x - b.x, a.y - b.y), zoom };
+    dragging = false; dragXY = null;
+    return;
+  }
+  if (ev.pointerType === 'mouse') { dragging = true; dragXY = { x: ev.clientX, y: ev.clientY }; dragMoved = 0; return; }
+  // 触摸：点哪颗星就看哪一段
+  if (!G) return;
+  const id = findHover(ev.clientX, ev.clientY);
+  if (id != null) { hover = id; neighborhood(id); hoverFade = Math.min(hoverFade, 0.25); applySimilar(id); openEvent(id); }
+  else { hover = null; hot = new Set(); near = new Set(); document.getElementById('panel').classList.remove('open'); }
+});
+
+let moveTick = 0;
+cvs.addEventListener('pointermove', (ev) => {
+  ptr = { x: ev.clientX, y: ev.clientY };
+  if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (pointers.size === 2 && pinch0) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomTarget = Math.max(0.55, Math.min(3.4, pinch0.zoom * (d / Math.max(1, pinch0.d))));
+    return;
+  }
+  if (dragging && dragXY) {
+    const dx = ev.clientX - dragXY.x;
+    const dy = ev.clientY - dragXY.y;
+    dragXY.x = ev.clientX; dragXY.y = ev.clientY;
+    dragMoved += Math.abs(dx) + Math.abs(dy);
+    rotOff -= dx * 0.006;
+    rotOffTarget = rotOff;
+    // 上下拖：把云前后点起来（夹在 ±0.9 弧度内，别让它翻过去）
+    // 上下拖的方向：往下拖 = 视角抬高（看云的顶面），往上拖 = 压低。她要求反过来。
+    pitchOffTarget = Math.max(-0.9, Math.min(0.9, pitchOffTarget + dy * 0.005));
+    return;
+  }
+  if (ev.pointerType !== 'mouse' || !G) return;
+  const now = performance.now();
+  if (now - moveTick < 16) return;
+  moveTick = now;
+  const id = findHover(ev.clientX, ev.clientY);
+  if (id === hover) return;
+  hover = id;
+  if (id != null) {
+    neighborhood(id); cvs.style.cursor = 'pointer';
+    hoverFade = Math.min(hoverFade, 0.25);   // 换到另一颗：照亮重新从小圈扩开
+    applySimilar(id);
+  }
+  else { hot = new Set(); near = new Set(); cvs.style.cursor = 'default'; }
+});
+
+function endPointer(ev) {
+  pointers.delete(ev.pointerId);
+  if (pointers.size < 2) pinch0 = null;
+  if (ev.pointerType === 'mouse') { dragging = false; dragXY = null; }
+}
+cvs.addEventListener('pointerup', endPointer);
+cvs.addEventListener('pointercancel', endPointer);
+
+cvs.addEventListener('pointerleave', () => {
+  ptr = null;
+  if (dragging) return;
+  hover = null; hot = new Set(); near = new Set();
+});
+
+cvs.addEventListener('dblclick', () => { rotOffTarget = 0; pitchOffTarget = 0; zoomTarget = 1; });
+cvs.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  zoomTarget = Math.max(0.55, Math.min(3.4, zoomTarget * Math.exp(-ev.deltaY * 0.0016)));
+}, { passive: false });
+
+cvs.addEventListener('click', (ev) => {
+  if (dragMoved > 4) { dragMoved = 0; return; }
+  if (ev.pointerType === 'mouse' && hover != null) openEvent(hover);
+});
+
+async function openEvent(id) {
+  const p = G.nodes.find((n) => n.id === id);
+  if (!p) return;
+  const r = await fetch('/api/event?uid=' + encodeURIComponent(p.uid));
+  const d = await r.json();
+  const panel = document.getElementById('panel');
+  document.getElementById('ptitle').textContent = d.title ?? '';
+  document.getElementById('psub').textContent = (d.meta?.count ?? d.rows.length) + ' 条 · ' +
+    new Date(d.meta?.start ?? p.at).toLocaleString('zh-CN', { hour12: false }).slice(0, 16);
+  const log = document.getElementById('plog');
+  log.innerHTML = d.rows.length
+    ? d.rows.map(m => {
+        const t = new Date(m.ts).toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5);
+        const who = m.sender === 'Yuki' ? '我' : (m.sender || '她');
+        const cls = m.sender === 'Yuki' ? 'msg me' : 'msg';
+        return '<p class="' + cls + '"><span class="t">' + t + '</span><span class="who">' + who + '</span>' +
+          escapeHtml(m.text || '[' + (m.type ?? '') + ']') + '</p>';
+      }).join('')
+    : '<p class="empty">这段窗口没有原始文字（可能全在图片/语音里）。</p>';
+  log.scrollTop = 0;
+  panel.classList.add('open');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+document.getElementById('close').addEventListener('click', () => document.getElementById('panel').classList.remove('open'));
+window.addEventListener('keydown', (e) => {
+  if (e.key === '1') load('bright');
+  if (e.key === '2') load('half');
+  if (e.key === '3') load('real');
+  if (e.key === '[' || e.key === ']') {
+    rotScale = Math.min(6, Math.max(0.25, rotScale * (e.key === '[' ? 1.15 : 1 / 1.15)));
+    localStorage.setItem(ROT_SPEED_KEY, String(rotScale));
+    window.__rotScale = rotScale;
+    return;
+  }
+  if (e.key === '0') { rotOffTarget = 0; pitchOffTarget = 0; zoomTarget = 1; }
+  if (e.key === 'Escape') document.getElementById('panel').classList.remove('open');
+});
+window.addEventListener('resize', resize);
+
+resize();
+load(QS.get('mode') || 'real').then(() => {
+  const h = QS.get('hover');
+  if (h != null && G && G.nodes[Number(h)]) { hover = G.nodes[Number(h)].id; neighborhood(hover); }
+  if (window.matchMedia('(max-width: 760px)').matches) {
+    document.getElementById('hint').textContent = '轻点光点看那一段的原话 · 拖动转 · 双指缩放';
+  } else {
+    document.getElementById('hint').textContent = '1 全亮 · 2 半衰 · 3 真实 · 拖动转 · 滚轮缩放 · 双击回正';
+  }
+  const o = QS.get('open');
+  if (o != null && G) { const p = G.nodes.find((n) => n.uid === o) ?? G.nodes[Number(o)]; if (p) openEvent(p.id); }
+});
+setInterval(refreshGlow, 30000);</script>
+</body>
+</html>
